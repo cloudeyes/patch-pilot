@@ -74,7 +74,7 @@ diff --git a/src/file2.ts b/src/file2.ts
 --- a/src/file2.ts
 +++ b/src/file2.ts
 @@ -5,7 +5,7 @@ import { useState } from 'react';
- 
+
  export function Component() {
    const [state, setState] = useState(false);
 -  return <div>Component</div>;
@@ -140,4 +140,57 @@ ReactDOM.render(
 // to log results (for example: reportWebVitals(console.log))
 // or send to an analytics endpoint. Learn more: https://bit.ly/CRA-vitals
 reportWebVitals();
+`;
+
+/**
+ * A file add diff
+ */
+export const ADD_FILE_DIFF = `diff --git a/dev/null b/src/new-file.ts
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/src/new-file.ts
+@@ -0,0 +1,3 @@
++export const added = true;
++export function greet() {
++  return 'hello';
+`;
+
+/**
+ * A file delete diff
+ */
+export const DELETE_FILE_DIFF = `diff --git a/src/old-file.ts b/dev/null
+deleted file mode 100644
+index e69de29..0000000
+--- a/src/old-file.ts
++++ /dev/null
+@@ -1,3 +0,0 @@
+-export const removed = true;
+-export function legacy() {
+-  return 'bye';
+`;
+
+/**
+ * A rename-only diff
+ */
+export const RENAME_ONLY_DIFF = `diff --git a/src/old-name.ts b/src/new-name.ts
+similarity index 100%
+rename from src/old-name.ts
+rename to src/new-name.ts
+`;
+
+/**
+ * A rename + modify diff
+ */
+export const RENAME_MODIFY_DIFF = `diff --git a/src/old-name.ts b/src/new-name.ts
+similarity index 85%
+rename from src/old-name.ts
+rename to src/new-name.ts
+--- a/src/old-name.ts
++++ b/src/new-name.ts
+@@ -1,3 +1,3 @@
+ export const value = 1;
+-export function oldName() {
++export function newName() {
+  return value;
 `;

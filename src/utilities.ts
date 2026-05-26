@@ -2,14 +2,21 @@
  *  PatchPilot — Utility functions
  * ----------------------------------------------------------------------- */
 
-import * as crypto from 'crypto';
-
 /**
  * Generates a cryptographically secure nonce string for Content Security Policy
  * @returns A random nonce string
  */
 export function getNonce(): string {
-  return crypto.randomBytes(16).toString('base64');
+  const bytes = new Uint8Array(16);
+  const cryptoObj = globalThis.crypto;
+  if (cryptoObj?.getRandomValues) {
+    cryptoObj.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 /**
@@ -33,7 +40,10 @@ export function autoFixSpaces(diffText: string): string {
     .map(line => {
       // If line is neither a diff header, nor starts with '+', '-', ' ', or '@'
       // then it's likely a context line missing a leading space
-      if (line.trim() !== '' && !/^(\+|-| |@|diff |index |---|\+\+\+|@@)/.test(line)) {
+      if (
+        line.trim() !== '' &&
+        !/^(\+|-| |@|diff |index |---|\+\+\+|@@|new file mode |deleted file mode |old mode |new mode |similarity index |dissimilarity index |rename from |rename to |copy from |copy to |Binary files |GIT binary patch)/.test(line)
+      ) {
         return ' ' + line;
       }
       return line;
@@ -52,24 +62,24 @@ export function addMissingHeaders(diffText: string): string {
     // Extract file path from the first +++ line if possible
     const fileMatch = diffText.match(/\+\+\+ b\/(.+)/);
     const filePath = fileMatch ? fileMatch[1] : 'unknown-file';
-    
+
     const header = [
       `diff --git a/${filePath} b/${filePath}`,
       `--- a/${filePath}`,
       `+++ b/${filePath}`
     ].join('\n');
-    
+
     // Check if we already have --- and +++ lines
     if (!diffText.includes('--- ') && !diffText.includes('+++ ')) {
       return header + '\n' + diffText;
     }
-    
+
     // If we have +++ but no ---, add just the diff and --- lines
     if (!diffText.includes('--- ') && diffText.includes('+++ ')) {
       return `diff --git a/${filePath} b/${filePath}\n--- a/${filePath}\n` + diffText;
     }
   }
-  
+
   return diffText;
 }
 
@@ -81,7 +91,7 @@ export function addMissingHeaders(diffText: string): string {
 export function normalizeDiff(diffText: string): string {
   // First, normalize actual line endings
   let normalized = normalizeLineEndings(diffText);
-  
+
   // Then handle escaped control characters that appear as literal strings
   normalized = normalized.replace(/\\r\\n|\\r|\\n/g, '');
 
@@ -114,7 +124,7 @@ export function normalizeDiff(diffText: string): string {
     }
     normalized = lines.join('\n');
   }
-  
+
   normalized = autoFixSpaces(normalized);
   normalized = addMissingHeaders(normalized);
   return normalized;
@@ -140,7 +150,7 @@ export function extractFileNamesFromHeader(diffHeader: string): { oldFile?: stri
       .trim();
     return { oldFile, newFile };
   }
-  
+
   return { oldFile: undefined, newFile: undefined };
 }
 
@@ -153,23 +163,23 @@ export function isUnifiedDiff(text: string): boolean {
   if (!text || text.trim() === '') {
     return false;
   }
-  
+
   // Look for common diff markers
-  const hasDiffMarker = text.includes('diff --git') || 
-                       text.includes('--- ') || 
+  const hasDiffMarker = text.includes('diff --git') ||
+                       text.includes('--- ') ||
                        text.includes('+++ ');
-  
+
   // Look for hunk headers with proper format
   const hasHunkHeader = /@@ -\d+,\d+ \+\d+,\d+ @@/.test(text);
-  
+
   // Look for multiple lines starting with +/- to detect diff content
   // Count the number of lines that start with + or -
   const lines = text.split('\n');
   const plusMinusLines = lines.filter(line => /^[+\-]/.test(line.trim()));
-  
+
   // If there are multiple +/- lines, it's likely a diff
   const hasMultiplePlusMinusLines = plusMinusLines.length >= 2;
-  
+
   // Return true if any of these patterns match
   return hasDiffMarker || hasHunkHeader || hasMultiplePlusMinusLines;
 }
@@ -184,15 +194,15 @@ export function debounce<T extends (...args: unknown[]) => unknown>(
   func: T,
   wait: number
 ): (...args: Parameters<T>) => void {
-  let timeout: NodeJS.Timeout | null = null;
-  
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+
   return function(this: unknown, ...args: Parameters<T>): void {
     const context = this;
     const later = () => {
       timeout = null;
       func.apply(context, args);
     };
-    
+
     if (timeout !== null) {
       clearTimeout(timeout);
     }
@@ -211,7 +221,7 @@ export function throttle<T extends (...args: unknown[]) => unknown>(
   limit: number
 ): (...args: Parameters<T>) => void {
   let inThrottle = false;
-  
+
   return function(this: unknown, ...args: Parameters<T>): void {
     const context = this;
     if (!inThrottle) {

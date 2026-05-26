@@ -123,7 +123,7 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "yarn compile",
+    "vscode:prepublish": "node esbuild.js --production && node build-webview.js --production",
     "compile": "node esbuild.js --production && node build-webview.js --production",
     "watch:extension": "node esbuild.js --watch",
     "watch:webview": "node build-webview.js --watch",
@@ -133,7 +133,7 @@
     "build:webview": "node build-webview.js",
     "start": "node ./out/extension.js",
     "dev": "webpack --mode development && code --new-window --extensionDevelopmentPath=.",
-    "package": "vsce package",
+    "package": "vsce package --no-yarn --no-dependencies",
     "publish": "vsce publish",
     "release": "node scripts/release.js",
     "postinstall": "node -e \"try{require('vscode/bin/install')}catch(e){}\"",

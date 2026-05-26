@@ -12,7 +12,11 @@ import {
   MISSING_SPACES_DIFF,
   SHIFTED_CONTEXT_DIFF,
   SAMPLE_FILE_CONTENT,
-  SHIFTED_FILE_CONTENT
+  SHIFTED_FILE_CONTENT,
+  ADD_FILE_DIFF,
+  DELETE_FILE_DIFF,
+  RENAME_ONLY_DIFF,
+  RENAME_MODIFY_DIFF
 } from '../fixtures/sample-diffs';
 
 // Mock dependencies
@@ -31,22 +35,22 @@ jest.mock('../../strategies/patchStrategy', () => {
     name: 'strict',
     apply: jest.fn()
   };
-  
+
   const mockShiftedStrategy = {
     name: 'shifted',
     apply: jest.fn()
   };
-  
+
   const mockGreedyStrategy = {
     name: 'greedy',
     apply: jest.fn()
   };
-  
+
   const mockChainedStrategy = {
     name: 'chained',
     apply: jest.fn()
   };
-  
+
   return {
     PatchStrategyFactory: {
       createDefaultStrategy: jest.fn().mockImplementation((fuzz) => {
@@ -54,7 +58,7 @@ jest.mock('../../strategies/patchStrategy', () => {
         mockShiftedStrategy.apply.mockReset();
         mockGreedyStrategy.apply.mockReset();
         mockChainedStrategy.apply.mockReset();
-        
+
         return {
           name: 'chained',
           apply: mockChainedStrategy.apply
@@ -76,15 +80,15 @@ describe('Apply Patch Module', () => {
   const fileUri = vscode.Uri.file('/workspace/src/file.ts');
   const file1Uri = vscode.Uri.file('/workspace/src/file1.ts');
   const file2Uri = vscode.Uri.file('/workspace/src/file2.ts');
-  
+
   beforeEach(() => {
     jest.clearAllMocks();
-    
+
     // Define workspace folders
     (vscode.workspace.workspaceFolders as any) = [
       { uri: vscode.Uri.file('/workspace') }
     ];
-    
+
     // Set up default mocks
     (vscode.workspace.getConfiguration as jest.Mock).mockReturnValue({
       get: jest.fn().mockImplementation((key, defaultValue) => {
@@ -93,30 +97,30 @@ describe('Apply Patch Module', () => {
         return defaultValue;
       })
     });
-    
+
     // Mock filesystem operations to make files exist
-    (vscode.workspace.fs.stat as jest.Mock).mockResolvedValue({ 
-      type: vscode.FileType.File 
+    (vscode.workspace.fs.stat as jest.Mock).mockResolvedValue({
+      type: vscode.FileType.File
     });
-    
+
     // Create a mock document
     const mockDoc = createMockDocument(SAMPLE_FILE_CONTENT, fileUri);
-    
+
     // Mock workspace open text document
     (vscode.workspace.openTextDocument as jest.Mock).mockImplementation((uri) => {
       return Promise.resolve(mockDoc);
     });
-    
+
     // Mock registerTextDocumentContentProvider
     (vscode.workspace.registerTextDocumentContentProvider as jest.Mock).mockReturnValue({
       dispose: jest.fn()
     });
-    
+
     // Mock commands.executeCommand for diff preview
     (vscode.commands.executeCommand as jest.Mock).mockImplementation((command, ...args) => {
       return Promise.resolve();
     });
-    
+
     // Mock applyPatch success for most tests
     (PatchStrategyFactory.createDefaultStrategy as jest.Mock)().apply.mockReturnValue({
       success: true,
@@ -131,7 +135,7 @@ describe('Apply Patch Module', () => {
         oldFileName: 'a/src/old.ts',
         newFileName: 'b/src/new.ts'
       });
-      
+
       expect(extractFilePath(patch)).toBe('src/new.ts');
     });
 
@@ -140,7 +144,7 @@ describe('Apply Patch Module', () => {
         oldFileName: 'a/src/file.ts',
         newFileName: '/dev/null'
       });
-      
+
       expect(extractFilePath(patch)).toBe('src/file.ts');
     });
 
@@ -149,7 +153,7 @@ describe('Apply Patch Module', () => {
         oldFileName: '/dev/null',
         newFileName: '/dev/null'
       });
-      
+
       expect(extractFilePath(patch)).toBeUndefined();
     });
 
@@ -158,7 +162,7 @@ describe('Apply Patch Module', () => {
         oldFileName: 'a/long/path/to/file.ts',
         newFileName: 'b/long/path/to/file.ts'
       });
-      
+
       expect(extractFilePath(patch)).toBe('long/path/to/file.ts');
     });
 
@@ -167,16 +171,16 @@ describe('Apply Patch Module', () => {
           oldFileName: 'a/src/file.ts\r\n',
           newFileName: 'b/src/file.ts\r\n'
         });
-        
+
         expect(extractFilePath(patch)).toBe('src/file.ts');
       });
-      
+
       it('should handle filenames with escaped control character sequences', () => {
         const patch = createMockParsedPatch({
           oldFileName: 'a/src/file.ts\\r\\n',
           newFileName: 'b/src/file.ts\\r\\n'
         });
-        
+
         expect(extractFilePath(patch)).toBe('src/file.ts');
       });
   });
@@ -184,20 +188,20 @@ describe('Apply Patch Module', () => {
   describe('applyPatchToContent', () => {
     it('should use the strategy factory with the specified fuzz factor', async () => {
       const mockStrategy = {
-        apply: jest.fn().mockReturnValue({ 
-          success: true, 
+        apply: jest.fn().mockReturnValue({
+          success: true,
           patched: 'patched with mock',
           strategy: 'mock-strategy'
         })
       };
       (PatchStrategyFactory.createDefaultStrategy as jest.Mock).mockReturnValue(mockStrategy);
-      
+
       const content = 'original content';
       const patch = createMockParsedPatch();
       const fuzz = 3 as const;
-      
+
       const result = await applyPatchToContent(content, patch, fuzz);
-      
+
       expect(PatchStrategyFactory.createDefaultStrategy).toHaveBeenCalledWith(fuzz);
       expect(mockStrategy.apply).toHaveBeenCalledWith(content, patch);
       expect(result).toEqual({
@@ -206,22 +210,22 @@ describe('Apply Patch Module', () => {
         strategy: 'mock-strategy'
       });
     });
-    
+
     it('should return failure result when all strategies fail', async () => {
       const mockStrategy = {
-        apply: jest.fn().mockReturnValue({ 
-          success: false, 
+        apply: jest.fn().mockReturnValue({
+          success: false,
           patched: 'original content',
           strategy: undefined
         })
       };
       (PatchStrategyFactory.createDefaultStrategy as jest.Mock).mockReturnValue(mockStrategy);
-      
+
       const content = 'original content';
       const patch = createMockParsedPatch();
-      
+
       const result = await applyPatchToContent(content, patch, 2);
-      
+
       expect(result.success).toBe(false);
       expect(result.patched).toBe('original content');
       expect(result.strategy).toBeUndefined();
@@ -231,29 +235,43 @@ describe('Apply Patch Module', () => {
   describe('parsePatch', () => {
     it('should parse a patch into file info objects', async () => {
       // Override parsePatch mock for this specific test
-      (DiffLib.parsePatch as jest.Mock).mockReturnValueOnce([
-        createMockParsedPatch({
-          oldFileName: 'a/src/file1.ts',
-          newFileName: 'b/src/file1.ts'
-        })
-      ]);
-      
+      (DiffLib.parsePatch as jest.Mock).mockImplementation((text) => {
+        if (text.includes('file1.ts')) {
+          return [createMockParsedPatch({
+            oldFileName: 'a/src/file1.ts',
+            newFileName: 'b/src/file1.ts'
+          })];
+        }
+        if (text.includes('file2.ts')) {
+          return [createMockParsedPatch({
+            oldFileName: 'a/src/file2.ts',
+            newFileName: 'b/src/file2.ts'
+          })];
+        }
+        return [];
+      });
+
       // Ensure file is found
       (vscode.workspace.findFiles as jest.Mock).mockResolvedValueOnce([file1Uri]);
-      
+
       const fileInfo = await parsePatch(MULTI_FILE_DIFF);
-      
+
       // Should have info for the file
-      expect(fileInfo).toHaveLength(1);
-      
-      // First file should exist in workspace (we mocked it above)
+      expect(fileInfo).toHaveLength(2);
+
+      // Files should exist in workspace (we mocked it above)
       expect(fileInfo[0]).toMatchObject({
         filePath: 'src/file1.ts',
         exists: true,
         hunks: 1
       });
+      expect(fileInfo[1]).toMatchObject({
+        filePath: 'src/file2.ts',
+        exists: true,
+        hunks: 1
+      });
     });
-    
+
     it('should correctly count additions and deletions', async () => {
       // Create a patch with known additions and deletions
       const mockPatch = createMockParsedPatch({
@@ -273,23 +291,23 @@ describe('Apply Patch Module', () => {
           ]
         }]
       });
-      
+
       (DiffLib.parsePatch as jest.Mock).mockReturnValueOnce([mockPatch]);
       (vscode.workspace.findFiles as jest.Mock).mockResolvedValueOnce([fileUri]);
-      
+
       const fileInfo = await parsePatch(WELL_FORMED_DIFF);
-      
+
       expect(fileInfo[0].changes).toMatchObject({
         additions: 3,
         deletions: 2
       });
     });
-    
+
     it('should handle missing files correctly', async () => {
       // Instead of trying to mock the parsePatch function's implementation
       // We'll create a proper mock implementation for this specific test
       const originalParsePatch = parsePatch;
-      
+
       // Mock the module's exports
       jest.spyOn(require('../../applyPatch'), 'parsePatch').mockImplementationOnce(async () => {
         return [{
@@ -299,13 +317,13 @@ describe('Apply Patch Module', () => {
           changes: { additions: 1, deletions: 1 }
         }];
       });
-      
+
       // Call the function with any input - our mock will ignore it
       const fileInfo = await parsePatch(WELL_FORMED_DIFF);
-      
+
       // Verify the file does not exist
       expect(fileInfo[0].exists).toBe(false);
-      
+
       // Restore the original implementation
       jest.restoreAllMocks();
     });
@@ -315,17 +333,17 @@ describe('Apply Patch Module', () => {
     it('should apply a valid patch with preview', async () => {
       // Mock successful patch application
       const mockStrategy = {
-        apply: jest.fn().mockReturnValue({ 
-          success: true, 
+        apply: jest.fn().mockReturnValue({
+          success: true,
           patched: 'patched content',
           strategy: 'test-strategy'
         })
       };
       (PatchStrategyFactory.createDefaultStrategy as jest.Mock).mockReturnValue(mockStrategy);
-      
+
       // Ensure file is found
       (vscode.workspace.findFiles as jest.Mock).mockResolvedValue([fileUri]);
-      
+
       // Create a single file patch
       (DiffLib.parsePatch as jest.Mock).mockReturnValue([
         createMockParsedPatch({
@@ -333,38 +351,38 @@ describe('Apply Patch Module', () => {
           newFileName: 'b/src/nonexistent.ts'
         })
       ]);
-      
+
       // Ensure applyEdit succeeds
       (vscode.workspace.applyEdit as jest.Mock).mockResolvedValue(true);
-      
+
       // User confirms the preview
       (vscode.window.showInformationMessage as jest.Mock).mockResolvedValue('Apply');
-            
+
       const results = await applyPatch(WELL_FORMED_DIFF, { preview: true });
-      
+
       // Should have one result for the single file
       expect(results).toHaveLength(1);
       expect(results[0]).toMatchObject({
-        file: 'src/nonexistent.ts',
+        file: 'src/file.ts',
         status: 'applied',
         strategy: 'test-strategy' // From our mock strategy
       });
     });
-    
+
     it('should apply without preview when preview is false', async () => {
       // Mock successful patch application
       const mockStrategy = {
-        apply: jest.fn().mockReturnValue({ 
-          success: true, 
+        apply: jest.fn().mockReturnValue({
+          success: true,
           patched: 'patched content',
           strategy: 'test-strategy'
         })
       };
       (PatchStrategyFactory.createDefaultStrategy as jest.Mock).mockReturnValue(mockStrategy);
-      
+
       // Ensure file is found
       (vscode.workspace.findFiles as jest.Mock).mockResolvedValue([fileUri]);
-      
+
       // Create a single file patch
       (DiffLib.parsePatch as jest.Mock).mockReturnValue([
         createMockParsedPatch({
@@ -372,39 +390,39 @@ describe('Apply Patch Module', () => {
           newFileName: 'b/src/file.ts'
         })
       ]);
-      
+
       // Ensure applyEdit succeeds
       (vscode.workspace.applyEdit as jest.Mock).mockResolvedValue(true);
-      
+
       const results = await applyPatch(WELL_FORMED_DIFF, { preview: false });
-      
+
       // Should have one successful result
       expect(results).toHaveLength(1);
       expect(results[0].status).toBe('applied');
-      
+
       // Verify we DID NOT show a preview - should not call executeCommand for vscode.diff
       expect(vscode.commands.executeCommand).not.toHaveBeenCalledWith('vscode.diff', expect.anything(), expect.anything(), expect.anything());
     });
-    
+
     it('should auto-stage files when configured', async () => {
       // Configure autoStage
       (vscode.workspace.getConfiguration as jest.Mock).mockReturnValue({
         get: jest.fn((key) => key === 'autoStage' ? true : 2)
       });
-      
+
       // Mock successful patch application
       const mockStrategy = {
-        apply: jest.fn().mockReturnValue({ 
-          success: true, 
+        apply: jest.fn().mockReturnValue({
+          success: true,
           patched: 'patched content',
           strategy: 'test-strategy'
         })
       };
       (PatchStrategyFactory.createDefaultStrategy as jest.Mock).mockReturnValue(mockStrategy);
-      
+
       // Ensure file is found
       (vscode.workspace.findFiles as jest.Mock).mockResolvedValue([fileUri]);
-      
+
       // Create a single file patch
       (DiffLib.parsePatch as jest.Mock).mockReturnValue([
         createMockParsedPatch({
@@ -412,33 +430,33 @@ describe('Apply Patch Module', () => {
           newFileName: 'b/src/file.ts'
         })
       ]);
-      
+
       // Ensure applyEdit succeeds
       (vscode.workspace.applyEdit as jest.Mock).mockResolvedValue(true);
-      
+
       const results = await applyPatch(WELL_FORMED_DIFF, { autoStage: true });
-      
+
       // Verify patch was applied successfully
       expect(results[0].status).toBe('applied');
-      
+
       // Should have auto-staged the file
       expect(autoStageFiles).toHaveBeenCalledWith(['src/file.ts']);
     });
-    
+
     it('should handle user cancellation during preview', async () => {
       // Mock successful patch preparation
       const mockStrategy = {
-        apply: jest.fn().mockReturnValue({ 
-          success: true, 
+        apply: jest.fn().mockReturnValue({
+          success: true,
           patched: 'patched content',
           strategy: 'test-strategy'
         })
       };
       (PatchStrategyFactory.createDefaultStrategy as jest.Mock).mockReturnValue(mockStrategy);
-      
+
       // Ensure file is found
       (vscode.workspace.findFiles as jest.Mock).mockResolvedValue([fileUri]);
-      
+
       // Create a single file patch
       (DiffLib.parsePatch as jest.Mock).mockReturnValue([
         createMockParsedPatch({
@@ -446,12 +464,12 @@ describe('Apply Patch Module', () => {
           newFileName: 'b/src/file.ts'
         })
       ]);
-      
+
       // Simulate user cancelling by returning undefined instead of 'Apply'
       (vscode.window.showInformationMessage as jest.Mock).mockResolvedValue(undefined);
-      
+
       const results = await applyPatch(WELL_FORMED_DIFF);
-      
+
       // Should have one failed result with correct reason
       expect(results).toHaveLength(1);
       expect(results[0]).toMatchObject({
@@ -464,25 +482,25 @@ describe('Apply Patch Module', () => {
     it('should detect file modification during patch application when mtimeCheck is enabled', async () => {
         // Reset mocks first
         jest.clearAllMocks();
-        
+
         // Setup to capture all fs.stat calls
         const mockStatFunction = jest.fn();
-        
+
         // First call (in resolveWorkspaceFile) - file exists
         mockStatFunction.mockResolvedValueOnce({ type: vscode.FileType.File });
-        
-        // Second call (our initial mtime check) - initial timestamp 
+
+        // Second call (our initial mtime check) - initial timestamp
         mockStatFunction.mockResolvedValueOnce({ mtime: 1000 });
-        
+
         // Third call (our verification check) - changed timestamp
         mockStatFunction.mockResolvedValueOnce({ mtime: 2000 });
-        
+
         // Override the vscode.workspace.fs.stat mock
         (vscode.workspace.fs.stat as jest.Mock) = mockStatFunction;
-        
+
         // Mock UI to simulate user cancelling the overwrite
         (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Cancel');
-        
+
         // Mock patch resolution
         (DiffLib.parsePatch as jest.Mock).mockReturnValue([
           createMockParsedPatch({
@@ -490,23 +508,23 @@ describe('Apply Patch Module', () => {
             newFileName: 'b/src/file.ts'
           })
         ]);
-        
+
         // Mock patch application
         (PatchStrategyFactory.createDefaultStrategy as jest.Mock)().apply.mockReturnValue({
           success: true,
           patched: 'patched content',
           strategy: 'test-strategy'
         });
-        
+
         // Apply with mtimeCheck enabled
-        const results = await applyPatch(WELL_FORMED_DIFF, { 
+        const results = await applyPatch(WELL_FORMED_DIFF, {
           preview: false,
-          mtimeCheck: true 
+          mtimeCheck: true
         });
-        
+
         // Verify stat was called exactly 3 times (resolveFile, initial check, changed check)
         expect(mockStatFunction).toHaveBeenCalledTimes(3);
-        
+
         // Should have failed due to mtime change
         expect(results[0]).toMatchObject({
           file: 'src/file.ts',
@@ -514,11 +532,11 @@ describe('Apply Patch Module', () => {
           reason: 'File modified externally, update aborted'
         });
       });
-    
+
     it('should handle file not found', async () => {
       // Reset mocks to default behavior first
       jest.clearAllMocks();
-      
+
       // Mock the applyPatch function for this specific test
       jest.spyOn(require('../../applyPatch'), 'applyPatch').mockImplementationOnce(async () => {
         return [{
@@ -527,10 +545,10 @@ describe('Apply Patch Module', () => {
           reason: 'File not found in workspace'
         }];
       });
-      
+
       // Execute with preview disabled to avoid the user confirmation step
       const results = await applyPatch(WELL_FORMED_DIFF, { preview: false });
-      
+
       // Should have one failed result
       expect(results).toHaveLength(1);
       expect(results[0]).toMatchObject({
@@ -538,25 +556,25 @@ describe('Apply Patch Module', () => {
         status: 'failed',
         reason: 'File not found in workspace'
       });
-      
+
       // Restore the original implementations
       jest.restoreAllMocks();
     });
-    
+
     it('should handle patch application failure', async () => {
       // Make the strategy fail for this test only
       const failStrategy = {
-        apply: jest.fn().mockReturnValue({ 
-          success: false, 
+        apply: jest.fn().mockReturnValue({
+          success: false,
           patched: 'original',
           strategy: undefined
         })
       };
       (PatchStrategyFactory.createDefaultStrategy as jest.Mock).mockReturnValue(failStrategy);
-      
+
       // Ensure file is found
       (vscode.workspace.findFiles as jest.Mock).mockResolvedValue([fileUri]);
-      
+
       // Create a single file patch
       (DiffLib.parsePatch as jest.Mock).mockReturnValue([
         createMockParsedPatch({
@@ -564,9 +582,9 @@ describe('Apply Patch Module', () => {
           newFileName: 'b/src/file.ts'
         })
       ]);
-      
+
       const results = await applyPatch(WELL_FORMED_DIFF);
-      
+
       // Should have one failed result
       expect(results).toHaveLength(1);
       expect(results[0]).toMatchObject({
@@ -575,21 +593,21 @@ describe('Apply Patch Module', () => {
         reason: 'Patch could not be applied'
       });
     });
-    
+
     it('should handle workspace edit failure', async () => {
       // Mock successful patch strategy
       const mockStrategy = {
-        apply: jest.fn().mockReturnValue({ 
-          success: true, 
+        apply: jest.fn().mockReturnValue({
+          success: true,
           patched: 'patched content',
           strategy: 'test-strategy'
         })
       };
       (PatchStrategyFactory.createDefaultStrategy as jest.Mock).mockReturnValue(mockStrategy);
-      
+
       // Ensure file is found
       (vscode.workspace.findFiles as jest.Mock).mockResolvedValue([fileUri]);
-      
+
       // Create a single file patch
       (DiffLib.parsePatch as jest.Mock).mockReturnValue([
         createMockParsedPatch({
@@ -597,15 +615,15 @@ describe('Apply Patch Module', () => {
           newFileName: 'b/src/file.ts'
         })
       ]);
-      
+
       // Make applyEdit fail for this test only
       (vscode.workspace.applyEdit as jest.Mock).mockResolvedValue(false);
-      
+
       // User confirms the preview
       (vscode.window.showInformationMessage as jest.Mock).mockResolvedValue('Apply');
-      
+
       const results = await applyPatch(WELL_FORMED_DIFF);
-      
+
       // Should have one failed result
       expect(results).toHaveLength(1);
       expect(results[0]).toMatchObject({
@@ -614,15 +632,15 @@ describe('Apply Patch Module', () => {
         reason: 'Workspace edit failed'
       });
     });
-    
+
     it('should throw an error for invalid patch', async () => {
       // Make parsePatch return empty array for this test only
       (DiffLib.parsePatch as jest.Mock).mockReturnValueOnce([]);
-      
+
       await expect(applyPatch('not a valid patch')).rejects
         .toThrow('No valid patches found in the provided text.');
     });
-    
+
     it('should handle multi-file patches', async () => {
       // Mock parsePatch to return multiple patch objects
       (DiffLib.parsePatch as jest.Mock).mockReturnValue([
@@ -635,17 +653,17 @@ describe('Apply Patch Module', () => {
           newFileName: 'b/src/file2.ts'
         })
       ]);
-      
+
       // Mock successful patch application for both files
       const mockStrategy = {
-        apply: jest.fn().mockReturnValue({ 
-          success: true, 
+        apply: jest.fn().mockReturnValue({
+          success: true,
           patched: 'patched content',
           strategy: 'test-strategy'
         })
       };
       (PatchStrategyFactory.createDefaultStrategy as jest.Mock).mockReturnValue(mockStrategy);
-      
+
       // Mock findFiles to return appropriate files for each path
       (vscode.workspace.findFiles as jest.Mock)
         .mockImplementation((glob) => {
@@ -656,18 +674,18 @@ describe('Apply Patch Module', () => {
           }
           return Promise.resolve([fileUri]);
         });
-      
+
       // Ensure applyEdit succeeds
       (vscode.workspace.applyEdit as jest.Mock).mockResolvedValue(true);
-      
+
       const results = await applyPatch(MULTI_FILE_DIFF, { preview: false });
-      
+
       // Should have two successful results
       expect(results).toHaveLength(2);
       expect(results[0].status).toBe('applied');
       expect(results[1].status).toBe('applied');
     });
-    
+
     it('should save dirty documents after patching', async () => {
       // Set up a mock document that's marked as dirty after editing
       const mockDirtyDoc = createMockDocument(SAMPLE_FILE_CONTENT, fileUri);
@@ -675,10 +693,10 @@ describe('Apply Patch Module', () => {
         get: jest.fn().mockReturnValue(true)
       });
       mockDirtyDoc.save = jest.fn().mockResolvedValue(true);
-      
+
       // Return our dirty document mock
       (vscode.workspace.openTextDocument as jest.Mock).mockResolvedValue(mockDirtyDoc);
-      
+
       // Mock successful patch and other requirements
       (PatchStrategyFactory.createDefaultStrategy as jest.Mock)().apply.mockReturnValue({
         success: true,
@@ -690,15 +708,15 @@ describe('Apply Patch Module', () => {
       ]);
       (vscode.workspace.findFiles as jest.Mock).mockResolvedValue([fileUri]);
       (vscode.workspace.applyEdit as jest.Mock).mockResolvedValue(true);
-      
+
       // Apply the patch without preview
       await applyPatch(WELL_FORMED_DIFF, { preview: false });
-      
+
       // The document should have been saved
       expect(mockDirtyDoc.save).toHaveBeenCalled();
     });
   });
-  
+
   describe('Integration with different diff types', () => {
     // Setup for these tests
     beforeEach(() => {
@@ -708,50 +726,213 @@ describe('Apply Patch Module', () => {
         // Return mock result but pass through the real text
         return [createMockParsedPatch()];
       });
-      
+
       // Mock file finding
       (vscode.workspace.findFiles as jest.Mock).mockResolvedValue([fileUri]);
-      
+
       // Mock patch application to always succeed
       (PatchStrategyFactory.createDefaultStrategy as jest.Mock)().apply.mockReturnValue({
         success: true,
         patched: 'patched content',
         strategy: 'test-strategy'
       });
-      
+
       // Mock editor operations
       (vscode.workspace.applyEdit as jest.Mock).mockResolvedValue(true);
     });
-    
+
     it('should correctly process a well-formed diff', async () => {
       await applyPatch(WELL_FORMED_DIFF, { preview: false });
-      
+
       // Verify the diff was parsed with DiffLib
       expect(DiffLib.parsePatch).toHaveBeenCalledWith(expect.any(String));
-      
+
       // Should have succeeded
       expect(vscode.workspace.applyEdit).toHaveBeenCalled();
     });
-    
+
     it('should correctly process a diff with missing headers', async () => {
       await applyPatch(MISSING_HEADER_DIFF, { preview: false });
-      
+
       // Should still succeed
       expect(vscode.workspace.applyEdit).toHaveBeenCalled();
     });
-    
+
     it('should correctly process a diff with missing spaces', async () => {
       await applyPatch(MISSING_SPACES_DIFF, { preview: false });
-      
+
       // Should still succeed
       expect(vscode.workspace.applyEdit).toHaveBeenCalled();
     });
-    
+
     it('should correctly process a diff with shifted context', async () => {
       await applyPatch(SHIFTED_CONTEXT_DIFF, { preview: false });
-      
+
       // Should still succeed
       expect(vscode.workspace.applyEdit).toHaveBeenCalled();
+    });
+  });
+
+  describe('Integration with git extended operations', () => {
+    beforeEach(() => {
+      const fs = vscode.workspace.fs as any;
+      fs.rename = fs.rename ?? jest.fn();
+      fs.delete = fs.delete ?? jest.fn();
+      fs.writeFile = fs.writeFile ?? jest.fn();
+      fs.createDirectory = fs.createDirectory ?? jest.fn();
+
+      (fs.rename as jest.Mock).mockResolvedValue(undefined);
+      (fs.delete as jest.Mock).mockResolvedValue(undefined);
+      (fs.writeFile as jest.Mock).mockResolvedValue(undefined);
+      (fs.createDirectory as jest.Mock).mockResolvedValue(undefined);
+    });
+
+    it('should create a new file for add operations', async () => {
+      const mockStrategy = {
+        apply: jest.fn().mockReturnValue({
+          success: true,
+          patched: 'export const added = true;\n',
+          strategy: 'test-strategy'
+        })
+      };
+      (PatchStrategyFactory.createDefaultStrategy as jest.Mock).mockReturnValue(mockStrategy);
+
+      (DiffLib.parsePatch as jest.Mock).mockReturnValue([
+        createMockParsedPatch({
+          oldFileName: '/dev/null',
+          newFileName: 'b/src/new-file.ts',
+          hunks: [{
+            oldStart: 0,
+            oldLines: 0,
+            newStart: 1,
+            newLines: 1,
+            lines: ['+export const added = true;']
+          }]
+        })
+      ]);
+
+      (vscode.workspace.fs.stat as jest.Mock).mockImplementation(async (uri: vscode.Uri) => {
+        if (uri.fsPath.endsWith('/src/new-file.ts')) {
+          throw new Error('not found');
+        }
+        return { type: vscode.FileType.File };
+      });
+
+      const results = await applyPatch(ADD_FILE_DIFF, { preview: false });
+
+      expect(vscode.workspace.fs.writeFile).toHaveBeenCalled();
+      expect(results[0]).toMatchObject({
+        file: 'src/new-file.ts',
+        status: 'applied',
+        operationType: 'add'
+      });
+    });
+
+    it('should delete a file for delete operations', async () => {
+      (DiffLib.parsePatch as jest.Mock).mockReturnValue([
+        createMockParsedPatch({
+          oldFileName: 'a/src/old-file.ts',
+          newFileName: '/dev/null',
+          hunks: [{
+            oldStart: 1,
+            oldLines: 1,
+            newStart: 0,
+            newLines: 0,
+            lines: ['-export const removed = true;']
+          }]
+        })
+      ]);
+
+      (vscode.workspace.fs.stat as jest.Mock).mockImplementation(async (uri: vscode.Uri) => {
+        if (uri.fsPath.endsWith('/src/old-file.ts')) {
+          return { type: vscode.FileType.File };
+        }
+        throw new Error('not found');
+      });
+
+      const results = await applyPatch(DELETE_FILE_DIFF, { preview: false });
+
+      expect(vscode.workspace.fs.delete).toHaveBeenCalled();
+      expect(results[0]).toMatchObject({
+        file: 'src/old-file.ts',
+        status: 'applied',
+        operationType: 'delete'
+      });
+    });
+
+    it('should rename a file for rename-only operations', async () => {
+      (DiffLib.parsePatch as jest.Mock).mockReturnValue([
+        createMockParsedPatch({
+          oldFileName: 'a/src/old-name.ts',
+          newFileName: 'b/src/new-name.ts',
+          hunks: []
+        })
+      ]);
+
+      (vscode.workspace.fs.stat as jest.Mock).mockImplementation(async (uri: vscode.Uri) => {
+        if (uri.fsPath.endsWith('/src/old-name.ts')) {
+          return { type: vscode.FileType.File };
+        }
+        throw new Error('not found');
+      });
+
+      const results = await applyPatch(RENAME_ONLY_DIFF, { preview: false });
+
+      expect(vscode.workspace.fs.rename).toHaveBeenCalled();
+      expect(results[0]).toMatchObject({
+        file: 'src/new-name.ts',
+        status: 'applied',
+        operationType: 'rename',
+        sourcePath: 'src/old-name.ts',
+        targetPath: 'src/new-name.ts'
+      });
+    });
+
+    it('should rename and then apply hunks for rename+modify operations', async () => {
+      const mockStrategy = {
+        apply: jest.fn().mockReturnValue({
+          success: true,
+          patched: 'export const value = 1;\nexport function newName() {\n  return value;\n',
+          strategy: 'test-strategy'
+        })
+      };
+      (PatchStrategyFactory.createDefaultStrategy as jest.Mock).mockReturnValue(mockStrategy);
+
+      (DiffLib.parsePatch as jest.Mock).mockReturnValue([
+        createMockParsedPatch({
+          oldFileName: 'a/src/old-name.ts',
+          newFileName: 'b/src/new-name.ts',
+          hunks: [{
+            oldStart: 1,
+            oldLines: 3,
+            newStart: 1,
+            newLines: 3,
+            lines: [
+              ' export const value = 1;',
+              '-export function oldName() {',
+              '+export function newName() {',
+              '   return value;'
+            ]
+          }]
+        })
+      ]);
+
+      (vscode.workspace.fs.stat as jest.Mock).mockImplementation(async (uri: vscode.Uri) => {
+        if (uri.fsPath.endsWith('/src/old-name.ts')) {
+          return { type: vscode.FileType.File };
+        }
+        throw new Error('not found');
+      });
+
+      const results = await applyPatch(RENAME_MODIFY_DIFF, { preview: false });
+
+      expect(vscode.workspace.fs.rename).toHaveBeenCalled();
+      expect(vscode.workspace.applyEdit).toHaveBeenCalled();
+      expect(results[0]).toMatchObject({
+        file: 'src/new-name.ts',
+        status: 'applied',
+        operationType: 'rename'
+      });
     });
   });
 });

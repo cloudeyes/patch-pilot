@@ -3,10 +3,10 @@
  * ----------------------------------------------------------------------- */
 
 import * as vscode from 'vscode';
-import * as DiffLib from 'diff';
 import { normalizeDiff } from './utilities';
 import { autoStageFiles } from './gitSecure';
 import { trackEvent } from './telemetry';
+import { GitDiffOperation, parseGitDiffOperations } from './gitExtendedDiff';
 import {
   PatchStrategyFactory,
   PatchResult,
@@ -16,6 +16,7 @@ import {
   ApplyResult,
   FileInfo,
   DiffParsedPatch,
+  PatchOperationType,
 } from './types/patchTypes';
 import { useOptimizedStrategies } from './strategies/optimizedPatchStrategy';
 
@@ -34,127 +35,424 @@ export async function applyPatch(
   const mtimeCheck = opts.mtimeCheck ?? cfg.get('mtimeCheck', true);
 
   const canonical = normalizeDiff(patchText);
-  const patches = DiffLib.parsePatch(canonical) as DiffParsedPatch[];
-  if (patches.length === 0) {
+  const operations = parseGitDiffOperations(canonical);
+  if (operations.length === 0 || operations.every((op) => !op.patch && op.operationType === 'modify')) {
     throw new Error('No valid patches found in the provided text.');
   }
 
   const results: ApplyResult[] = [];
   const staged: string[] = [];
 
-  for (const patch of patches) {
-    const relPath = extractFilePath(patch) ?? 'unknown-file';
+  for (const operation of operations) {
+    const relPath = operation.targetPath ?? operation.sourcePath ?? 'unknown-file';
 
     try {
-      const fileUri = await resolveWorkspaceFile(relPath);
-      if (!fileUri) {
-        results.push({
-          file: relPath,
-          status: 'failed',
-          reason: 'File not found in workspace',
-        });
-        continue;
-      }
-
-      // Record file stats before reading to detect external changes
-      let fileStats: vscode.FileStat | undefined;
-      if (mtimeCheck) {
-        try {
-          fileStats = await vscode.workspace.fs.stat(fileUri);
-        } catch (_err) {
-          // If stat fails, continue anyway but without mtime check
-          const output = vscode.window.createOutputChannel('PatchPilot');
-          output.appendLine(`Could not get file stats for ${relPath}, skipping mtime check`);
-        }
-      }
-
-      const doc = await vscode.workspace.openTextDocument(fileUri);
-      const original = doc.getText();
-      const { patched, success, strategy, diagnostics } = await applyPatchToContent(
-        original,
-        patch,
-        fuzz,
-      );
-
-      if (!success) {
-        const reason = diagnostics
-          ? `Patch could not be applied\n${diagnostics}`
-          : 'Patch could not be applied';
-        results.push({
-          file: relPath,
-          status: 'failed',
-          reason,
-        });
-        continue;
-      }
-
-      if (preview) {
-        const confirmed = await showPatchPreview(
-          fileUri,
-          original,
-          patched,
-          relPath,
-        );
-        if (!confirmed) {
+      switch (operation.operationType) {
+      case 'add': {
+        const targetPath = operation.targetPath ?? relPath;
+        const targetUri = await resolveWorkspaceTarget(targetPath);
+        const existingTarget = await pathExists(targetUri);
+        if (existingTarget) {
           results.push({
-            file: relPath,
+            file: targetPath,
             status: 'failed',
-            reason: 'User cancelled after preview',
+            reason: 'Target file already exists for add operation',
+            operationType: 'add',
+            targetPath,
           });
           continue;
         }
-      }
 
-      // Check if file was modified externally while we were working
-      if (mtimeCheck && fileStats) {
-        try {
-          const currentStats = await vscode.workspace.fs.stat(fileUri);
-          
-          // Compare mtimes directly - in VS Code API these are numbers 
-          // (milliseconds since epoch)
-          if (fileStats.mtime !== currentStats.mtime) {
-            const confirmOverwrite = await vscode.window.showWarningMessage(
-              `File ${relPath} has been modified since reading it. Apply patch anyway?`,
-              { modal: true },
-              'Apply Anyway',
-              'Cancel'
-            );
-            
-            if (confirmOverwrite !== 'Apply Anyway') {
-              results.push({
-                file: relPath,
-                status: 'failed',
-                reason: 'File modified externally, update aborted'
-              });
-              continue;
-            }
+        let patched = '';
+        let strategy: string | undefined = 'add-file';
+        if (operation.patch && operation.patch.hunks.length > 0) {
+          const applyResult = await applyPatchToContent('', operation.patch, fuzz);
+          if (!applyResult.success) {
+            const reason = applyResult.diagnostics
+              ? `Patch could not be applied\n${applyResult.diagnostics}`
+              : 'Patch could not be applied';
+            results.push({
+              file: targetPath,
+              status: 'failed',
+              reason,
+              operationType: 'add',
+              targetPath,
+            });
+            continue;
           }
-        } catch (_err) {
-          // If stat fails at this point, continue but log warning
-          const output = vscode.window.createOutputChannel('PatchPilot');
-          output.appendLine(`Could not verify file stats for ${relPath}`);
+          patched = applyResult.patched;
+          strategy = applyResult.strategy ?? strategy;
         }
-      }
 
-      const edit = new vscode.WorkspaceEdit();
-      edit.replace(fileUri, fullDocRange(doc), patched);
-      if (!(await vscode.workspace.applyEdit(edit))) {
+        if (preview) {
+          const confirmed = await showPatchPreview(targetUri, '', patched, targetPath);
+          if (!confirmed) {
+            results.push({
+              file: targetPath,
+              status: 'failed',
+              reason: 'User cancelled after preview',
+              operationType: 'add',
+              targetPath,
+            });
+            continue;
+          }
+        }
+
+        await ensureParentDirectory(targetUri);
+        await vscode.workspace.fs.writeFile(targetUri, new TextEncoder().encode(patched));
+
+        results.push({
+          file: targetPath,
+          status: 'applied',
+          strategy,
+          operationType: 'add',
+          targetPath,
+        });
+        if (autoStage) {staged.push(targetPath);}
+        break;
+      }
+      case 'delete': {
+        const sourcePath = operation.sourcePath ?? relPath;
+        const sourceUri = await resolveWorkspaceFile(sourcePath);
+        if (!sourceUri) {
+          results.push({
+            file: sourcePath,
+            status: 'failed',
+            reason: 'File not found in workspace',
+            operationType: 'delete',
+            sourcePath,
+          });
+          continue;
+        }
+
+        let fileStats: vscode.FileStat | undefined;
+        if (mtimeCheck) {
+          try {
+            fileStats = await vscode.workspace.fs.stat(sourceUri);
+          } catch {
+            fileStats = undefined;
+          }
+        }
+
+        const doc = await vscode.workspace.openTextDocument(sourceUri);
+        const original = doc.getText();
+
+        if (preview) {
+          const confirmed = await showPatchPreview(sourceUri, original, '', sourcePath);
+          if (!confirmed) {
+            results.push({
+              file: sourcePath,
+              status: 'failed',
+              reason: 'User cancelled after preview',
+              operationType: 'delete',
+              sourcePath,
+            });
+            continue;
+          }
+        }
+
+        if (mtimeCheck && fileStats) {
+          const proceed = await confirmMtime(sourceUri, sourcePath, fileStats);
+          if (!proceed) {
+            results.push({
+              file: sourcePath,
+              status: 'failed',
+              reason: 'File modified externally, update aborted',
+              operationType: 'delete',
+              sourcePath,
+            });
+            continue;
+          }
+        }
+
+        await vscode.workspace.fs.delete(sourceUri, { useTrash: false });
+        results.push({
+          file: sourcePath,
+          status: 'applied',
+          strategy: 'delete-file',
+          operationType: 'delete',
+          sourcePath,
+        });
+        if (autoStage) {staged.push(sourcePath);}
+        break;
+      }
+      case 'rename': {
+        const sourcePath = operation.sourcePath;
+        const targetPath = operation.targetPath;
+        if (!sourcePath || !targetPath) {
+          results.push({
+            file: relPath,
+            status: 'failed',
+            reason: 'Rename operation missing source or target path',
+            operationType: 'rename',
+            sourcePath,
+            targetPath,
+          });
+          continue;
+        }
+
+        const sourceUri = await resolveWorkspaceFile(sourcePath);
+        if (!sourceUri) {
+          results.push({
+            file: targetPath,
+            status: 'failed',
+            reason: 'File not found in workspace',
+            operationType: 'rename',
+            sourcePath,
+            targetPath,
+          });
+          continue;
+        }
+
+        const targetUri = await resolveWorkspaceTarget(targetPath);
+        const targetExists = await pathExists(targetUri);
+        if (targetExists) {
+          results.push({
+            file: targetPath,
+            status: 'failed',
+            reason: 'Rename target already exists',
+            operationType: 'rename',
+            sourcePath,
+            targetPath,
+          });
+          continue;
+        }
+
+        let fileStats: vscode.FileStat | undefined;
+        if (mtimeCheck) {
+          try {
+            fileStats = await vscode.workspace.fs.stat(sourceUri);
+          } catch {
+            fileStats = undefined;
+          }
+        }
+
+        const sourceDoc = await vscode.workspace.openTextDocument(sourceUri);
+        const original = sourceDoc.getText();
+        let patched = original;
+        let strategy: string | undefined = 'rename-file';
+
+        if (operation.patch && operation.patch.hunks.length > 0) {
+          const applyResult = await applyPatchToContent(original, operation.patch, fuzz);
+          if (!applyResult.success) {
+            const reason = applyResult.diagnostics
+              ? `Patch could not be applied\n${applyResult.diagnostics}`
+              : 'Patch could not be applied';
+            results.push({
+              file: targetPath,
+              status: 'failed',
+              reason,
+              operationType: 'rename',
+              sourcePath,
+              targetPath,
+            });
+            continue;
+          }
+
+          patched = applyResult.patched;
+          strategy = applyResult.strategy ?? strategy;
+        }
+
+        if (preview) {
+          const confirmed = await showPatchPreview(
+            sourceUri,
+            original,
+            patched,
+            `${sourcePath} -> ${targetPath}`,
+          );
+          if (!confirmed) {
+            results.push({
+              file: targetPath,
+              status: 'failed',
+              reason: 'User cancelled after preview',
+              operationType: 'rename',
+              sourcePath,
+              targetPath,
+            });
+            continue;
+          }
+        }
+
+        if (mtimeCheck && fileStats) {
+          const proceed = await confirmMtime(sourceUri, sourcePath, fileStats);
+          if (!proceed) {
+            results.push({
+              file: targetPath,
+              status: 'failed',
+              reason: 'File modified externally, update aborted',
+              operationType: 'rename',
+              sourcePath,
+              targetPath,
+            });
+            continue;
+          }
+        }
+
+        await ensureParentDirectory(targetUri);
+        await vscode.workspace.fs.rename(sourceUri, targetUri, { overwrite: false });
+
+        if (patched !== original) {
+          const renamedDoc = await vscode.workspace.openTextDocument(targetUri);
+          const edit = new vscode.WorkspaceEdit();
+          edit.replace(targetUri, fullDocRange(renamedDoc), patched);
+          if (!(await vscode.workspace.applyEdit(edit))) {
+            results.push({
+              file: targetPath,
+              status: 'failed',
+              reason: 'Workspace edit failed after rename',
+              operationType: 'rename',
+              sourcePath,
+              targetPath,
+            });
+            continue;
+          }
+
+          if (renamedDoc.isDirty) {await renamedDoc.save();}
+        }
+
+        results.push({
+          file: targetPath,
+          status: 'applied',
+          strategy,
+          operationType: 'rename',
+          sourcePath,
+          targetPath,
+        });
+        if (autoStage) {
+          staged.push(sourcePath);
+          staged.push(targetPath);
+        }
+        break;
+      }
+      case 'modify':
+      default: {
+        if (!operation.patch) {
+          results.push({
+            file: relPath,
+            status: 'failed',
+            reason: 'No patch content found for modify operation',
+            operationType: 'modify',
+            sourcePath: operation.sourcePath,
+            targetPath: operation.targetPath,
+          });
+          continue;
+        }
+
+        const fileUri = await resolveWorkspaceFile(relPath);
+        if (!fileUri) {
+          results.push({
+            file: relPath,
+            status: 'failed',
+            reason: 'File not found in workspace',
+            operationType: 'modify',
+            sourcePath: operation.sourcePath,
+            targetPath: operation.targetPath,
+          });
+          continue;
+        }
+
+        let fileStats: vscode.FileStat | undefined;
+        if (mtimeCheck) {
+          try {
+            fileStats = await vscode.workspace.fs.stat(fileUri);
+          } catch {
+            fileStats = undefined;
+          }
+        }
+
+        const doc = await vscode.workspace.openTextDocument(fileUri);
+        const original = doc.getText();
+        const { patched, success, strategy, diagnostics } = await applyPatchToContent(
+          original,
+          operation.patch,
+          fuzz,
+        );
+
+        if (!success) {
+          const reason = diagnostics
+            ? `Patch could not be applied\n${diagnostics}`
+            : 'Patch could not be applied';
+          results.push({
+            file: relPath,
+            status: 'failed',
+            reason,
+            operationType: 'modify',
+            sourcePath: operation.sourcePath,
+            targetPath: operation.targetPath,
+          });
+          continue;
+        }
+
+        if (preview) {
+          const confirmed = await showPatchPreview(
+            fileUri,
+            original,
+            patched,
+            relPath,
+          );
+          if (!confirmed) {
+            results.push({
+              file: relPath,
+              status: 'failed',
+              reason: 'User cancelled after preview',
+              operationType: 'modify',
+              sourcePath: operation.sourcePath,
+              targetPath: operation.targetPath,
+            });
+            continue;
+          }
+        }
+
+        if (mtimeCheck && fileStats) {
+          const proceed = await confirmMtime(fileUri, relPath, fileStats);
+          if (!proceed) {
+            results.push({
+              file: relPath,
+              status: 'failed',
+              reason: 'File modified externally, update aborted',
+              operationType: 'modify',
+              sourcePath: operation.sourcePath,
+              targetPath: operation.targetPath,
+            });
+            continue;
+          }
+        }
+
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(fileUri, fullDocRange(doc), patched);
+        if (!(await vscode.workspace.applyEdit(edit))) {
+          results.push({
+            file: relPath,
+            status: 'failed',
+            reason: 'Workspace edit failed',
+            operationType: 'modify',
+            sourcePath: operation.sourcePath,
+            targetPath: operation.targetPath,
+          });
+          continue;
+        }
+
+        if (doc.isDirty) {await doc.save();}
         results.push({
           file: relPath,
-          status: 'failed',
-          reason: 'Workspace edit failed',
+          status: 'applied',
+          strategy,
+          operationType: 'modify',
+          sourcePath: operation.sourcePath,
+          targetPath: operation.targetPath,
         });
-        continue;
+        if (autoStage) {staged.push(relPath);}
+        break;
       }
-
-      if (doc.isDirty) {await doc.save();}
-      results.push({ file: relPath, status: 'applied', strategy });
-      if (autoStage) {staged.push(relPath);}
+      }
     } catch (err) {
       results.push({
         file: relPath,
         status: 'failed',
         reason: (err as Error).message ?? String(err),
+        operationType: operation.operationType,
+        sourcePath: operation.sourcePath,
+        targetPath: operation.targetPath,
       });
     }
   }
@@ -189,30 +487,30 @@ export async function applyPatchToContent(
   // Check if the patch is large - could be performance intensive
   const isLargePatch = patch.hunks.length > 5 || content.length > 100000;
   const isLargeFile = content.length > 500000; // ~500KB
-  
+
   if (isLargePatch || isLargeFile) {
     // Use optimized strategies for large patches or files
     // This enhances performance with potentially large diffs
-    trackEvent('patch_content', { 
-      strategy: 'optimized', 
+    trackEvent('patch_content', {
+      strategy: 'optimized',
       hunkCount: patch.hunks.length,
       contentSize: content.length
     });
-    
+
     // Create the standard strategy first
     const standardStrategy = PatchStrategyFactory.createDefaultStrategy(fuzz);
     // Then wrap it with optimized strategies that handle large files better
     const optimizedStrategy = useOptimizedStrategies(standardStrategy, fuzz);
-    
+
     return optimizedStrategy.apply(content, patch);
   } else {
     // Use standard strategies for normal patches
-    trackEvent('patch_content', { 
-      strategy: 'standard', 
+    trackEvent('patch_content', {
+      strategy: 'standard',
       hunkCount: patch.hunks.length,
       contentSize: content.length
     });
-    
+
     return PatchStrategyFactory.createDefaultStrategy(fuzz).apply(content, patch);
   }
 }
@@ -328,7 +626,7 @@ async function resolveWorkspaceFile(
         description: `Last modified: ${new Date(stats.mtime).toLocaleString()}`
       });
     }
-    
+
     const pick = await vscode.window.showQuickPick(
       filesWithStats,
       {
@@ -341,6 +639,69 @@ async function resolveWorkspaceFile(
   return undefined;
 }
 
+async function resolveWorkspaceTarget(
+  relPath: string,
+): Promise<vscode.Uri> {
+  const roots = vscode.workspace.workspaceFolders;
+  if (!roots?.length) {throw new Error('No workspace folder open.');}
+
+  // Security improvement: Validate the relative path
+  if (!relPath || relPath.includes('..') || relPath.startsWith('/')) {
+    throw new Error(`Invalid file path: ${relPath}`);
+  }
+
+  for (const r of roots) {
+    const existingUri = vscode.Uri.joinPath(r.uri, relPath);
+    if (await pathExists(existingUri)) {
+      return existingUri;
+    }
+  }
+
+  return vscode.Uri.joinPath(roots[0].uri, relPath);
+}
+
+async function pathExists(uri: vscode.Uri): Promise<boolean> {
+  try {
+    await vscode.workspace.fs.stat(uri);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureParentDirectory(fileUri: vscode.Uri): Promise<void> {
+  const slashIdx = fileUri.path.lastIndexOf('/');
+  if (slashIdx <= 0) {return;}
+  const parentPath = fileUri.path.slice(0, slashIdx);
+  const parentUri = fileUri.with({ path: parentPath });
+  await vscode.workspace.fs.createDirectory(parentUri);
+}
+
+async function confirmMtime(
+  fileUri: vscode.Uri,
+  relPath: string,
+  originalStats: vscode.FileStat,
+): Promise<boolean> {
+  try {
+    const currentStats = await vscode.workspace.fs.stat(fileUri);
+    if (originalStats.mtime !== currentStats.mtime) {
+      const confirmOverwrite = await vscode.window.showWarningMessage(
+        `File ${relPath} has been modified since reading it. Apply patch anyway?`,
+        { modal: true },
+        'Apply Anyway',
+        'Cancel',
+      );
+
+      return confirmOverwrite === 'Apply Anyway';
+    }
+  } catch {
+    const output = vscode.window.createOutputChannel('PatchPilot');
+    output.appendLine(`Could not verify file stats for ${relPath}`);
+  }
+
+  return true;
+}
+
 function fullDocRange(doc: vscode.TextDocument): vscode.Range {
   const lastLine = doc.lineCount - 1;
   return new vscode.Range(0, 0, lastLine, doc.lineAt(lastLine).text.length);
@@ -350,48 +711,51 @@ function fullDocRange(doc: vscode.TextDocument): vscode.Range {
 
 export async function parsePatch(patchText: string): Promise<FileInfo[]> {
   const cleanPatchText = patchText.replace(/\\r\\n|\\r|\\n/g, '');
-  
+
   const normalized = normalizeDiff(cleanPatchText);
-  const patches = DiffLib.parsePatch(normalized) as DiffParsedPatch[];
+  const operations = parseGitDiffOperations(normalized);
 
   const info: FileInfo[] = [];
 
-  // Performance enhancement: pre-check all files first to avoid redundant workspace queries
-  const filePathMap = new Map<string, boolean>(); // Map of file path to existence status
-  
-  for (const p of patches) {
-    const path = extractFilePath(p);
-    if (!path) {continue;}
-    
-    // Skip duplicate paths
-    if (filePathMap.has(path)) {continue;}
-    
-    // Check if file exists
-    const uri = await resolveWorkspaceFile(path);
-    filePathMap.set(path, !!uri);
-  }
+  for (const op of operations) {
+    const filePath = op.targetPath ?? op.sourcePath;
+    if (!filePath) {continue;}
 
-  // Now process each patch with the pre-checked file existence status
-  for (const p of patches) {
-    const path = extractFilePath(p);
-    if (!path) {continue;}
-
-    let add = 0;
-    let del = 0;
-
-    p.hunks.forEach((h) =>
-      h.lines.forEach((l) => {
-        if (l.startsWith('+')) {add += 1;}
-        else if (l.startsWith('-')) {del += 1;}
-      }),
-    );
+    let exists = false;
+    switch (op.operationType) {
+    case 'add': {
+      const targetUri = await resolveWorkspaceTarget(filePath);
+      exists = !(await pathExists(targetUri));
+      break;
+    }
+    case 'rename': {
+      const sourceExists = op.sourcePath ? !!(await resolveWorkspaceFile(op.sourcePath)) : false;
+      const targetExists = op.targetPath
+        ? await pathExists(await resolveWorkspaceTarget(op.targetPath))
+        : false;
+      exists = sourceExists && !targetExists;
+      break;
+    }
+    case 'delete':
+    case 'modify':
+    default:
+      exists = !!(await resolveWorkspaceFile(filePath));
+      break;
+    }
 
     info.push({
-      filePath: path,
-      exists: filePathMap.get(path) ?? false,
-      hunks: p.hunks.length,
-      changes: { additions: add, deletions: del },
+      filePath,
+      exists,
+      hunks: op.patch?.hunks.length ?? 0,
+      operationType: op.operationType,
+      sourcePath: op.sourcePath,
+      targetPath: op.targetPath,
+      changes: {
+        additions: op.additions,
+        deletions: op.deletions,
+      },
     });
   }
+
   return info;
 }

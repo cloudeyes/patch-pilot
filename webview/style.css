@@ -135,6 +135,46 @@ p {
   background-color: var(--vscode-list-hoverBackground);
 }
 
+.file-op-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0.8rem;
+  padding: 0.08rem 0.1rem;
+  margin-right: 8px;
+  border-radius: 2px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  border: 1px solid transparent;
+  user-select: none;
+}
+
+.file-op-add {
+  color: #9be59b;
+  background-color: rgba(56, 138, 52, 0.16);
+  border-color: rgba(56, 138, 52, 0.38);
+}
+
+.file-op-delete {
+  color: #ff9a9a;
+  background-color: rgba(241, 76, 76, 0.16);
+  border-color: rgba(241, 76, 76, 0.38);
+}
+
+.file-op-rename {
+  color: #9be59b;
+  background-color: rgba(56, 138, 52, 0.16);
+  border-color: rgba(56, 138, 52, 0.38);
+}
+
+.file-op-modify {
+  color: #ffd86b;
+  background-color: rgba(204, 167, 0, 0.16);
+  border-color: rgba(204, 167, 0, 0.38);
+}
+
 /* Git actions container styles */
 .git-actions-container {
   margin-bottom: 20px;
@@ -381,12 +421,12 @@ kbd {
   .btn {
     border: 1px solid currentColor;
   }
-  
+
   .btn:focus, #patch-input:focus, .file-entry:focus {
     outline: 2px solid currentColor;
     outline-offset: 2px;
   }
-  
+
   /* Make disabled buttons retain visual distinction */
   .btn:disabled {
     opacity: 0.6;
@@ -400,7 +440,7 @@ kbd {
   .button-container {
     flex-direction: column;
   }
-  
+
   .btn {
     width: 100%;
   }

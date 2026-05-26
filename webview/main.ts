@@ -21,6 +21,7 @@ interface FileInfo {
   exists: boolean;
   hunks: number;
   changes: { additions: number; deletions: number };
+  operationType?: 'modify' | 'add' | 'delete' | 'rename';
 }
 
 // Result interface
@@ -102,31 +103,31 @@ function initialize() {
       currentPatchText = state.patchText;
     }
   }
-  
+
   // Focus the input
   patchInput.focus();
-  
+
   // Request current settings from extension
   if (vscode) {
     vscode.postMessage({ command: 'requestSettings' });
-  
+
     // Check clipboard for diff content
     vscode.postMessage({ command: 'checkClipboard' });
   }
-  
+
   // Setup event listeners
   previewBtn.addEventListener('click', () => {
     handlePreviewClick(patchInput, previewBtn, statusMessage);
   });
-  
+
   applyBtn.addEventListener('click', () => {
     handleApplyClick(applyBtn, cancelBtn, statusMessage);
   });
-  
+
   cancelBtn.addEventListener('click', () => {
     handleCancelClick(previewArea, previewBtn, applyBtn, cancelBtn, statusMessage);
   });
-  
+
   // Listen for changes to save state
   patchInput.addEventListener('input', () => {
     const text = patchInput.value;
@@ -135,7 +136,7 @@ function initialize() {
       if (vscode) {
         vscode.setState({ patchText: text });
       }
-      
+
       // If we have an active preview and text changed, show re-preview nudge
       const editHint = document.getElementById('edit-hint');
       if (_previewedPatchText && text !== _previewedPatchText && !previewArea.classList.contains('hidden')) {
@@ -153,7 +154,7 @@ function initialize() {
       }
     }
   });
-  
+
   // Handle keyboard shortcuts
   patchInput.addEventListener('keydown', (e) => {
     // Ctrl+Enter or Cmd+Enter to preview
@@ -161,19 +162,19 @@ function initialize() {
       e.preventDefault();
       handlePreviewClick(patchInput, previewBtn, statusMessage);
     }
-    
+
     // Tab key handling for better editing experience
     if (e.key === 'Tab') {
       e.preventDefault();
       const start = patchInput.selectionStart;
       const end = patchInput.selectionEnd;
-      
+
       // Insert tab character
       patchInput.value = patchInput.value.substring(0, start) + '  ' + patchInput.value.substring(end);
-      
+
       // Set cursor position after the inserted tab
       patchInput.selectionStart = patchInput.selectionEnd = start + 2;
-      
+
       // Update state
       currentPatchText = patchInput.value;
       if (vscode) {
@@ -196,17 +197,17 @@ function handlePreviewClick(
     setStatus(statusMessage, 'Please paste a unified diff to preview.', 'error');
     return;
   }
-  
+
   // Save current patch text
   currentPatchText = patchText;
   if (vscode) {
     vscode.setState({ patchText: patchText });
-  
+
     // Show loading state
     setStatus(statusMessage, 'Parsing patch...', 'normal');
     previewBtn.disabled = true;
     previewBtn.setAttribute('aria-disabled', 'true');
-    
+
     // Request preview from extension
     vscode.postMessage({
       command: 'previewPatch',
@@ -228,14 +229,14 @@ function handleApplyClick(
   // Always read the latest text from the textarea (user may have edited it)
   const patchInput = document.getElementById('patch-input') as HTMLTextAreaElement;
   const latestText = patchInput ? patchInput.value.trim() : currentPatchText;
-  
+
   // Show loading state
   setStatus(statusMessage, 'Applying patch...', 'normal');
   applyBtn.disabled = true;
   applyBtn.setAttribute('aria-disabled', 'true');
   cancelBtn.disabled = true;
   cancelBtn.setAttribute('aria-disabled', 'true');
-  
+
   // Send patch to extension
   if (vscode) {
     vscode.postMessage({
@@ -259,14 +260,14 @@ function handleCancelClick(
 ): void {
   // Reset UI
   resetUI(previewArea, previewBtn, applyBtn, cancelBtn, statusMessage);
-  
+
   // Send cancel to extension
   if (vscode) {
     vscode.postMessage({
       command: 'cancelPatch'
     });
   }
-  
+
   // Return focus to the textarea after cancellation
   const patchInput = document.getElementById('patch-input') as HTMLTextAreaElement;
   patchInput.focus();
@@ -300,12 +301,26 @@ function handlePatchPreview(
   fileInfo.forEach((file) => {
     if (!file.exists) {missingFiles++;}
 
+    const operationType = file.operationType ?? 'modify';
+    const operationLabel = {
+      add: 'A',
+      delete: 'D',
+      rename: 'R',
+      modify: 'M'
+    }[operationType];
+
     totalAdditions += file.changes.additions;
     totalDeletions += file.changes.deletions;
 
     const entry = document.createElement('div');
     entry.className = 'file-entry';
     entry.setAttribute('role', 'listitem');
+
+    const badge = document.createElement('span');
+    badge.className = `file-op-badge file-op-${operationType}`;
+    badge.textContent = operationLabel;
+    badge.title = `Operation: ${operationType.toUpperCase()}`;
+    badge.setAttribute('aria-label', `Operation ${operationType}`);
 
     const icon = document.createElement('span');
     icon.className = `file-icon ${file.exists ? 'success-icon' : 'warning-icon'}`;
@@ -319,7 +334,7 @@ function handlePatchPreview(
     stats.className = 'file-stats';
     stats.textContent = `(${file.hunks} hunks, +${file.changes.additions} -${file.changes.deletions})`;
 
-    entry.append(icon, pathSpan, stats);
+    entry.append(badge, icon, pathSpan, stats);
     fileList.appendChild(entry);
   });
 
@@ -386,11 +401,11 @@ function handlePatchResults(
     resetUI(previewArea, previewBtn, applyBtn, cancelBtn, statusMessage);
     return;
   }
-  
+
   // Count success and failures
   const successCount = results.filter(r => r.status === 'applied').length;
   const failCount = results.length - successCount;
-  
+
   // Group results by strategy
   const strategyCount: Record<string, number> = {};
   results.forEach(r => {
@@ -398,7 +413,7 @@ function handlePatchResults(
       strategyCount[r.strategy] = (strategyCount[r.strategy] || 0) + 1;
     }
   });
-  
+
   // Create strategy info text
   let strategyText = '';
   if (Object.keys(strategyCount).length > 0) {
@@ -407,25 +422,25 @@ function handlePatchResults(
       .join(', ');
     strategyText = ` (${strategies})`;
   }
-  
+
   // Set status based on results
   if (failCount === 0) {
     setStatus(statusMessage, `Successfully applied patches to ${successCount} file(s)${strategyText}.`, 'success');
   } else {
     setStatus(statusMessage, `Applied ${successCount} patch(es), ${failCount} failed. Check output for details.`, 'warning');
   }
-  
+
   // Reset UI
   previewArea.classList.add('hidden');
   previewArea.classList.remove('visible');
-  
+
   applyBtn.disabled = true;
   applyBtn.setAttribute('aria-disabled', 'true');
   cancelBtn.disabled = true;
   cancelBtn.setAttribute('aria-disabled', 'true');
   previewBtn.disabled = false;
   previewBtn.setAttribute('aria-disabled', 'false');
-  
+
   // Clear input if successful
   if (failCount === 0) {
     patchInput.value = '';
@@ -435,14 +450,14 @@ function handlePatchResults(
       vscode.setState({ patchText: '' });
     }
   }
-  
+
   // Hide edit hint
   const editHint = document.getElementById('edit-hint');
   if (editHint) {
     editHint.classList.add('hidden');
     editHint.classList.remove('re-preview-nudge');
   }
-  
+
   // Return focus to the textarea or preview button based on results
   if (failCount === 0) {
     patchInput.focus();
@@ -474,10 +489,10 @@ function setStatus(
   type: 'normal' | 'success' | 'warning' | 'error' = 'normal'
 ): void {
   statusElement.textContent = message;
-  
+
   // Reset classes
   statusElement.className = '';
-  
+
   // Add class based on type
   if (type === 'success') {
     statusElement.classList.add('success-icon');
@@ -500,7 +515,7 @@ function resetUI(
 ): void {
   previewArea.classList.add('hidden');
   previewArea.classList.remove('visible');
-  
+
   previewBtn.disabled = false;
   previewBtn.setAttribute('aria-disabled', 'false');
   applyBtn.disabled = true;
@@ -508,7 +523,7 @@ function resetUI(
   cancelBtn.disabled = true;
   cancelBtn.setAttribute('aria-disabled', 'true');
   setStatus(statusMessage, 'Ready to parse your unified diff.', 'normal');
-  
+
   // Reset edit hint and previewed text
   _previewedPatchText = '';
   const editHint = document.getElementById('edit-hint');
@@ -521,7 +536,7 @@ function resetUI(
 // Handle message events from the extension
 window.addEventListener('message', (event) => {
   const message = event.data as ExtensionMessage;
-  
+
   // Get DOM elements
   const patchInput = document.getElementById('patch-input') as HTMLTextAreaElement;
   const previewArea = document.getElementById('preview-area') as HTMLDivElement;
@@ -530,7 +545,7 @@ window.addEventListener('message', (event) => {
   const applyBtn = document.getElementById('apply-btn') as HTMLButtonElement;
   const cancelBtn = document.getElementById('cancel-btn') as HTMLButtonElement;
   const statusMessage = document.getElementById('status-message') as HTMLDivElement;
-  
+
   switch (message.command) {
     case 'patchPreview':
       if (message.fileInfo && previewArea && fileList && previewBtn && applyBtn && cancelBtn && statusMessage) {
